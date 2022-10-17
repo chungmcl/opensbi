@@ -121,6 +121,8 @@ struct sbi_platform_operations {
 	int (*timer_init)(bool cold_boot);
 	/** Exit platform timer for current HART */
 	void (*timer_exit)(void);
+  /** Handle platform timer event */
+  void (*timer_event_handle)(int source);
 
 	/** platform specific SBI extension implementation probe function */
 	int (*vendor_ext_check)(long extid);
@@ -611,6 +613,13 @@ static inline void sbi_platform_timer_exit(const struct sbi_platform *plat)
 {
 	if (plat && sbi_platform_ops(plat)->timer_exit)
 		sbi_platform_ops(plat)->timer_exit();
+}
+
+static inline void
+sbi_platform_timer_event_handle(const struct sbi_platform *plat, int source)
+{
+  if (plat && sbi_platform_ops(plat)->timer_event_handle)
+    sbi_platform_ops(plat)->timer_event_handle(source);
 }
 
 /**

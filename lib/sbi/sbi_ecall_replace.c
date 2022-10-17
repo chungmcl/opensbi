@@ -30,7 +30,7 @@ static int sbi_ecall_time_handler(unsigned long extid, unsigned long funcid,
 #if __riscv_xlen == 32
 		sbi_timer_event_start((((u64)regs->a1 << 32) | (u64)regs->a0));
 #else
-		sbi_timer_event_start((u64)regs->a0);
+		sbi_timer_event_start((u64)regs->a0, SBI_TIMER_SOURCE_ECALL);
 #endif
 	} else
 		ret = SBI_ENOTSUPP;

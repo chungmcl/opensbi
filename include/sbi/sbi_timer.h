@@ -48,6 +48,9 @@ static inline void sbi_timer_udelay(ulong usecs)
 	sbi_timer_delay_loop(usecs, 1000000, NULL, NULL);
 }
 
+#define SBI_TIMER_SOURCE_ECALL      0
+#define SBI_TIMER_SOURCE_MONITOR    1
+
 /** Get timer value for current HART */
 u64 sbi_timer_value(void);
 
@@ -64,7 +67,7 @@ void sbi_timer_set_delta(ulong delta);
 void sbi_timer_set_delta_upper(ulong delta_upper);
 
 /** Start timer event for current HART */
-void sbi_timer_event_start(u64 next_event);
+void sbi_timer_event_start(u64 next_event, int source);
 
 /** Process timer event for current HART */
 void sbi_timer_process(void);

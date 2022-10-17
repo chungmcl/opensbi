@@ -17,10 +17,28 @@
 #include <sbi/sbi_pmu.h>
 #include <sbi/sbi_scratch.h>
 #include <sbi/sbi_timer.h>
+#include <sbi/sbi_list.h>
+#include <sbi/riscv_locks.h>
+#include "sbi/sbi_console.h"
 
 static unsigned long time_delta_off;
+static unsigned long timer_list_off;
+
 static u64 (*get_time_val)(void);
 static const struct sbi_timer_device *timer_dev = NULL;
+
+#define sbi_scratch_thishart_timerlist() \
+	sbi_scratch_offset_ptr(sbi_scratch_thishart_ptr(), timer_list_off);
+
+#define MAX_TIMER_ENTRIES 16
+
+struct sbi_dlist free_list;
+static struct tl_entry {
+	struct sbi_dlist head;
+	u64 next_event;
+	int source;
+} timer_list_entries[MAX_TIMER_ENTRIES];
+static spinlock_t timer_lock = SPIN_LOCK_INITIALIZER;
 
 #if __riscv_xlen == 32
 static u64 get_ticks(void)
@@ -116,9 +134,49 @@ void sbi_timer_set_delta_upper(ulong delta_upper)
 	*time_delta |= ((u64)delta_upper << 32);
 }
 
-void sbi_timer_event_start(u64 next_event)
+void sbi_timer_event_start(u64 next_event, int source)
 {
 	sbi_pmu_ctr_incr_fw(SBI_PMU_FW_SET_TIMER);
+
+	struct tl_entry *t, *t_new = NULL, *t_next;
+	struct sbi_dlist *timer_events = sbi_scratch_thishart_timerlist();
+
+	// First, see if we have another free entry
+	spin_lock(&timer_lock);
+	if (sbi_list_empty(&free_list)) {
+		sbi_printf("Fatal: not enough timer entries");
+		sbi_hart_hang();
+	} else {
+		t_new = sbi_list_first_entry(&free_list, struct tl_entry, head);
+		sbi_list_del(&t_new->head);
+	}
+	spin_unlock(&timer_lock);
+
+	t_new->next_event = next_event;
+	t_new->source	  = source;
+
+	// Then, find the correct place to insert this callback
+	if (sbi_list_empty(timer_events)) {
+		sbi_list_add_tail(&t_new->head, timer_events);
+		t_next = t_new;
+	} else {
+		sbi_list_for_each_entry(t, timer_events, head) {
+			if (t->next_event > next_event) {
+				break;
+			}
+		}
+
+        if(&t->head == timer_events) {
+            // This entry needs to go to the back of the list
+            sbi_list_add_tail(&t_new->head, timer_events);
+        } else {
+            sbi_list_add_tail(&t_new->head, &t->head);
+        }
+
+		t_next = sbi_list_first_entry(timer_events, struct tl_entry, head);
+	}
+
+	next_event = t_next->next_event;
 
 	/**
 	 * Update the stimecmp directly if available. This allows
@@ -140,14 +198,39 @@ void sbi_timer_event_start(u64 next_event)
 
 void sbi_timer_process(void)
 {
+	int source;
+	struct tl_entry *t;
+	struct sbi_dlist *timer_events = sbi_scratch_thishart_timerlist();
+
+	// Pop the head off the list
+	if (unlikely(sbi_list_empty(timer_events))) {
+		sbi_printf("Fatal: unexpectedly empty timer queue");
+		sbi_hart_hang();
+	}
+
+	t = sbi_list_first_entry(timer_events, struct tl_entry, head);
+	sbi_list_del(&t->head);
+
+	// Release this entry back to the free list
+	source = t->source;
+	spin_lock(&timer_lock);
+	sbi_list_add_tail(&t->head, &free_list);
+	spin_unlock(&timer_lock);
+
+	// Handle any platform-specific interrupt functionality
 	csr_clear(CSR_MIE, MIP_MTIP);
-	/*
-	 * If sstc extension is available, supervisor can receive the timer
-	 * directly without M-mode come in between. This function should
-	 * only invoked if M-mode programs the timer for its own purpose.
-	 */
-	if (!sbi_hart_has_extension(sbi_scratch_thishart_ptr(), SBI_HART_EXT_SSTC))
-		csr_set(CSR_MIP, MIP_STIP);
+	sbi_platform_timer_event_handle(sbi_platform_thishart_ptr(), source);
+
+	if (source == SBI_TIMER_SOURCE_ECALL) {
+		/*
+		 * If sstc extension is available, supervisor can receive the timer
+		 * directly without M-mode come in between. This function should
+		 * only invoked if M-mode programs the timer for its own purpose.
+		 */
+
+		if (!sbi_hart_has_extension(sbi_scratch_thishart_ptr(), SBI_HART_EXT_SSTC))
+			csr_set(CSR_MIP, MIP_STIP);
+	}
 }
 
 const struct sbi_timer_device *sbi_timer_get_device(void)
@@ -167,6 +250,8 @@ void sbi_timer_set_device(const struct sbi_timer_device *dev)
 
 int sbi_timer_init(struct sbi_scratch *scratch, bool cold_boot)
 {
+	int i;
+	struct sbi_dlist *timer_events;
 	u64 *time_delta;
 	const struct sbi_platform *plat = sbi_platform_ptr(scratch);
 
@@ -175,15 +260,30 @@ int sbi_timer_init(struct sbi_scratch *scratch, bool cold_boot)
 		if (!time_delta_off)
 			return SBI_ENOMEM;
 
+		timer_list_off = sbi_scratch_alloc_offset(sizeof(struct sbi_dlist));
+		if (!timer_list_off)
+			return SBI_ENOMEM;
+
+		free_list.next = free_list.prev = &free_list;
+		for (i = 0; i < MAX_TIMER_ENTRIES; i++) {
+			sbi_list_add_tail(&timer_list_entries[i].head, &free_list);
+		}
+
 		if (sbi_hart_has_extension(scratch, SBI_HART_EXT_TIME))
 			get_time_val = get_ticks;
 	} else {
 		if (!time_delta_off)
 			return SBI_ENOMEM;
+
+		if (!timer_list_off)
+			return SBI_ENOMEM;
 	}
 
 	time_delta = sbi_scratch_offset_ptr(scratch, time_delta_off);
 	*time_delta = 0;
+
+	timer_events = sbi_scratch_offset_ptr(scratch, timer_list_off);
+	timer_events->next = timer_events->prev = timer_events;
 
 	return sbi_platform_timer_init(plat, cold_boot);
 }
