@@ -124,6 +124,8 @@ struct sbi_platform_operations {
   /** Handle platform timer event */
   void (*timer_event_handle)(int source);
 
+  void (*ipi_handle)(void);
+
 	/** platform specific SBI extension implementation probe function */
 	int (*vendor_ext_check)(long extid);
 	/** platform specific SBI extension implementation provider */
