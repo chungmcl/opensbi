@@ -208,28 +208,32 @@ void sbi_timer_process(void)
 		sbi_hart_hang();
 	}
 
-	t = sbi_list_first_entry(timer_events, struct tl_entry, head);
-	sbi_list_del(&t->head);
+	while(1) {
+		t = sbi_list_first_entry(timer_events, struct tl_entry, head);
+		if(t->next_event < sbi_timer_value()) {
+			sbi_list_del(&t->head);
 
-	// Release this entry back to the free list
-	source = t->source;
-	spin_lock(&timer_lock);
-	sbi_list_add_tail(&t->head, &free_list);
-	spin_unlock(&timer_lock);
+			// Release this entry back to the free list
+			source = t->source;
+			spin_lock(&timer_lock);
+			sbi_list_add_tail(&t->head, &free_list);
+			spin_unlock(&timer_lock);
 
-	// Handle any platform-specific interrupt functionality
-	csr_clear(CSR_MIE, MIP_MTIP);
-	sbi_platform_timer_event_handle(sbi_platform_thishart_ptr(), source);
+			// Handle any platform-specific interrupt functionality
+			csr_clear(CSR_MIE, MIP_MTIP);
+			sbi_platform_timer_event_handle(sbi_platform_thishart_ptr(), source);
 
-	if (source == SBI_TIMER_SOURCE_ECALL) {
-		/*
-		 * If sstc extension is available, supervisor can receive the timer
-		 * directly without M-mode come in between. This function should
-		 * only invoked if M-mode programs the timer for its own purpose.
-		 */
+			if (source == SBI_TIMER_SOURCE_ECALL) {
+				/*
+				 * If sstc extension is available, supervisor can receive the timer
+				 * directly without M-mode come in between. This function should
+				 * only invoked if M-mode programs the timer for its own purpose.
+				 */
 
-		if (!sbi_hart_has_extension(sbi_scratch_thishart_ptr(), SBI_HART_EXT_SSTC))
-			csr_set(CSR_MIP, MIP_STIP);
+				if (!sbi_hart_has_extension(sbi_scratch_thishart_ptr(), SBI_HART_EXT_SSTC))
+					csr_set(CSR_MIP, MIP_STIP);
+			}
+		} else break;
 	}
 }
 
